@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import pyodbc
+
 from datetime import datetime, time
 import sqlalchemy
 from sqlalchemy import create_engine
@@ -13,7 +13,7 @@ import time
 import subprocess
 import sqlite3
 
-
+#gp_client.connect(username="user1", password="andros+2021", host="212.156.144.178:7000")
 con3 = sqlite3.connect("recipe.db")
 cursor = con3.cursor()
 st.set_page_config(page_title="PLANLAMA")
