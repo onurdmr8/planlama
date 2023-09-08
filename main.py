@@ -3,6 +3,8 @@ import pandas as pd
 from datetime import datetime, time
 from sqlalchemy import create_engine, text
 import sqlite3
+from st_aggrid import GridOptionsBuilder, AgGrid, GridUpdateMode, DataReturnMode
+import pyodbc
 
 #gp_client.connect(username="user1", password="andros+2021", host="212.156.144.178:7000")
 con3 = sqlite3.connect("recipe.db")
@@ -12,7 +14,7 @@ st.sidebar.title("İŞ EMİRLERİ")
 servers = st.sidebar.selectbox("Server", ["VSTRAPP", "TEST"])
 menu_items = ["Ana sayfa", "Tüm Reçeteler","Yeni iş emri","İş Emri Düzenle",
               "Sezon dışı açık iş emirleri","Hatlardaki iş emirleri",
-              "Marinasyon Reçete","Stok","Siparişler","Açık iş emirleri","Üretim stok hareketleri","Üretim Rapor"]
+              "Marinasyon Reçete","Stok","Siparişler","Açık iş emirleri","Üretim stok hareketleri","Üretim Rapor","Toplu iş emri kapatma"]
 selected_option = st.sidebar.selectbox("Menu", menu_items)
 
 yenisifre="2207"
@@ -723,7 +725,7 @@ elif selected_option=="Tüm Reçeteler":
         ürmiktar = üretimmiktar
 
     querryreçete="""SELECT MAMUL_KODU,HAM_KODU,(SELECT STOK_ADI FROM TBLSTSABIT 
-        WHERE TBLSTOKURM.HAM_KODU=TBLSTSABIT.STOK_KODU) AS STOK_ADI, 
+        WHERE TBLSTOKURM.HAM_KODU=TBLSTSABIT.STOK_KODU) AS STOK_ADI,(SELECT OLCU_BR1 FROM TBLSTSABIT WHERE TBLSTOKURM.HAM_KODU=TBLSTSABIT.STOK_KODU) AS OLCU_BR1, 
         MIKTAR,OPR_BIL FROM TBLSTOKURM WHERE MAMUL_KODU=? AND (OPR_BIL='B' OR OPR_BIL='O')"""
 
     dfreçete = pd.read_sql(querryreçete, con, params=(mamukodu,))
@@ -733,8 +735,6 @@ elif selected_option=="Tüm Reçeteler":
         ürmiktar = float(ürmiktar)
     except ValueError:
         ürmiktar = 1
-
-
 
     dfreçete['GEREKEN'] = dfreçete['MIKTAR'] * float(ürmiktar)
 
@@ -789,16 +789,70 @@ elif selected_option=="Tüm Reçeteler":
             dfreçete.loc[dfreçete['HAM_KODU'] == ham_kodu, 'STOK'] = 0
     st.write(stokadı)
     st.write("BİLEŞENLER")
-    dfreçete=dfreçete[['HAM_KODU','STOK_ADI','GEREKEN','MIKTAR','STOK','DIS_DEPO_STOK']]
+    dfreçete['GEREKEN'] = dfreçete['GEREKEN'].astype(float)
+    dfreçete['STOK'] = dfreçete['STOK'].astype(float)
+    dfreçete['DIS_DEPO_STOK'] = dfreçete['DIS_DEPO_STOK'].astype(float)
+    dfreçete=dfreçete[['HAM_KODU','STOK_ADI','GEREKEN',"OLCU_BR1",'STOK','DIS_DEPO_STOK']]
     st.dataframe(dfreçete)
     st.write("ÇIKAN ÜRÜN")
+
     cıkanurunquery = """SELECT MAMUL_KODU,HAM_KODU,(SELECT STOK_ADI FROM TBLSTSABIT 
-        WHERE TBLSTOKURM.HAM_KODU=TBLSTSABIT.STOK_KODU) AS STOK_ADI, 
+        WHERE TBLSTOKURM.HAM_KODU=TBLSTSABIT.STOK_KODU) AS STOK_ADI,(SELECT OLCU_BR1 FROM TBLSTSABIT WHERE TBLSTOKURM.HAM_KODU=TBLSTSABIT.STOK_KODU) AS OLCU_BR1, 
         MIKTAR,OPR_BIL FROM TBLSTOKURM WHERE MAMUL_KODU=? AND OPR_BIL='Y' ORDER BY MAMUL_KODU DESC"""
     dfcıkanurun = pd.read_sql(cıkanurunquery, con, params=(mamukodu,))
 
+    for ham_kodu in ham_kodlari:
+        stokdurumquery = """
+        SELECT 
+            STOK_KODU,
+            SUM(
+                CASE 
+                    WHEN (DEPO_KODU = '401' OR DEPO_KODU = '400') AND STHAR_GCKOD = 'G' THEN STHAR_GCMIK
+                    WHEN (DEPO_KODU = '401' OR DEPO_KODU = '400') AND STHAR_GCKOD <> 'G' THEN -STHAR_GCMIK
+                    ELSE 0
+                END
+            ) AS AMB_DEPO
+        FROM 
+            TBLSTHAR
+        WHERE
+            STOK_KODU = ?
+        GROUP BY 
+            STOK_KODU
+        """
+        dısdepodurumquery = """
+        SELECT 
+            STOK_KODU,
+            SUM(
+                CASE 
+                    WHEN DEPO_KODU = '403' AND STHAR_GCKOD = 'G' THEN STHAR_GCMIK
+                    WHEN  DEPO_KODU = '403' AND STHAR_GCKOD <> 'G' THEN -STHAR_GCMIK
+                    ELSE 0
+                END
+            ) AS DIS_DEPO
+        FROM 
+            TBLSTHAR
+        WHERE
+            STOK_KODU = ?
+        GROUP BY 
+            STOK_KODU
+        """
+        dfdısdepodurum = pd.read_sql(dısdepodurumquery, con, params=(ham_kodu,))
+
+        # SQL sorgusunu çalıştırın ve sonucu alın
+        dfstokdurum = pd.read_sql(stokdurumquery, con, params=(ham_kodu,))
+        try:
+            dfcıkanurun.loc[dfcıkanurun['HAM_KODU'] == ham_kodu, 'DIS_DEPO_STOK'] = dfdısdepodurum['DIS_DEPO'].values[0]
+            dfcıkanurun.loc[dfcıkanurun['HAM_KODU'] == ham_kodu, 'STOK'] = dfstokdurum['AMB_DEPO'].values[0]
+        except IndexError:
+            dfcıkanurun.loc[dfcıkanurun['HAM_KODU'] == ham_kodu, 'DIS_DEPO_STOK'] = 0
+            dfcıkanurun.loc[dfcıkanurun['HAM_KODU'] == ham_kodu, 'STOK'] = 0
+
     dfcıkanurun['ÇIKAN_ÜRÜN'] = dfcıkanurun['MIKTAR'] * float(ürmiktar)
-    dfcıkanurun=dfcıkanurun[['MAMUL_KODU','STOK_ADI','MIKTAR','ÇIKAN_ÜRÜN']]
+    dfcıkanurun['STOK'] = dfcıkanurun['STOK'].astype(float)
+    dfcıkanurun['DIS_DEPO_STOK'] = dfcıkanurun['DIS_DEPO_STOK'].astype(float)
+
+
+    dfcıkanurun=dfcıkanurun[['MAMUL_KODU','STOK_ADI','MIKTAR','ÇIKAN_ÜRÜN','OLCU_BR1','STOK','DIS_DEPO_STOK']]
     st.dataframe(dfcıkanurun)
 elif selected_option=="Üretim stok hareketleri":
     st.title("Üretim Stok Hareketleri")
@@ -828,10 +882,182 @@ elif selected_option=="Üretim Rapor":
     st.title("Üretim Rapor")
     uretimyeriquery="""SELECT DISTINCT uretimyeri FROM dsc_rpr_uretimizleme"""
     dfuretimyeri = pd.read_sql(uretimyeriquery, con)
-    uretimyeri=st.selectbox("Üretimyeri", dfuretimyeri['uretimyeri'].unique().tolist())
-    urmraporquery="""SELECT surec, stokkodu, stokadi,serino,giriscikis,miktar,birim,uretimyeri FROM dsc_rpr_uretimizleme"""
+    col1,col2,col3=st.columns(3)
+    with col1:
+        uryer=dfuretimyeri['uretimyeri'].unique().tolist()
+        uryer.insert(0,"hepsi")
+        uretimyeri=st.selectbox("Üretimyeri", uryer)
+        filtrecheck=st.checkbox("Filtrele",False)
+
+    with col2:
+        surecguery="""SELECT surec FROM dsc_rpr_uretimizleme"""
+        dfsurec = pd.read_sql(surecguery, con)
+        list=dfsurec['surec'].unique().tolist()
+        list.insert(0,"hepsi")
+        surec=st.selectbox("Surec",list)
+        kod3guery = """SELECT kod3 FROM dsc_rpr_uretimizleme"""
+        dfkod3 = pd.read_sql(kod3guery, con)
+        listekod3=dfkod3['kod3'].unique().tolist()
+        listekod3.insert(0,"hepsi")
+        kod3=st.selectbox("ÜRÜN ?",listekod3)
+
+    with col3:
+        date=st.date_input("Tarih")
+        tar = st.checkbox("tarih ?", False)
+
+
+
+
+    urmraporquery="""SELECT surec, stokkodu, stokadi,serino,giriscikis,miktar,birim,uretimyeri,kayittarihi,kod3 FROM dsc_rpr_uretimizleme"""
     dfurmizleme = pd.read_sql(urmraporquery, con)
     #filter dfurmizleme with uretimyeri
-    dfurmizleme = dfurmizleme[dfurmizleme['uretimyeri'] == uretimyeri]
+    if filtrecheck:
+        if uretimyeri != "hepsi":
+            if tar:
+                if surec != "hepsi" and kod3 != "hepsi":
+                    dfurmizleme = dfurmizleme[dfurmizleme['surec'] == surec]
+                elif kod3 == "hepsi":
+                    dfurmizleme = dfurmizleme[dfurmizleme['kod3'] == kod3]
+            else:
+                if surec != "hepsi" and kod3 != "hepsi":
+                    dfurmizleme = dfurmizleme[dfurmizleme['surec'] == surec]
+                elif kod3 == "hepsi":
+                    dfurmizleme = dfurmizleme
+        elif tar:
+            if surec != "hepsi" and kod3 != "hepsi":
+                dfurmizleme = dfurmizleme[dfurmizleme['surec'] == surec]
+            elif kod3 == "hepsi":
+                dfurmizleme = dfurmizleme[dfurmizleme['kod3'] == kod3]
+        else:
+            dfurmizleme = dfurmizleme
 
     st.dataframe(dfurmizleme)
+elif selected_option=="Toplu iş emri kapatma":
+    sifre = st.sidebar.text_input("ŞİFRE", type="password")
+    if sifre == yenisifre:
+        st.title("Toplu İş Emri Kapatma")
+
+
+        def kapat(selected_rows):
+            with con.connect() as conn:
+                for row in selected_rows:
+                    isemrino = row['ISEMRINO']
+                    kapatquery = text("UPDATE TBLISEMRI SET KAPALI='E' WHERE ISEMRINO=:isemrino")
+                    conn.execute(kapatquery, parameters={"isemrino": isemrino})
+                    conn.commit()
+
+
+        kapatmaquery = """SELECT ISEMRINO, STOK_KODU, 
+            (SELECT STOK_ADI FROM TBLSTSABIT WHERE TBLSTSABIT.STOK_KODU = TBLISEMRI.STOK_KODU) AS STOK_ADI, 
+            KAPALI, SUBSTRING(ISEMRINO, 3, 1) AS vardiya,SUBSTRING(ISEMRINO, 1, 2) AS surec,TARIH 
+            FROM TBLISEMRI WHERE KAPALI='H' ORDER BY KAPALI DESC"""
+
+        dfkapatma = pd.read_sql(kapatmaquery, con)
+        dfkapatma = dfkapatma[['ISEMRINO', 'STOK_KODU', 'STOK_ADI', 'vardiya', 'KAPALI',"surec", 'TARIH']]
+        dfkapatma['TARIH'] = dfkapatma['TARIH'].dt.strftime('%d/%m/%Y')
+        col1,col2,col3=st.columns(3)
+        with col1:
+            aramamsormam=st.text_input("Stok adı")
+            stokkoduarama = st.text_input("Stok kodu")
+        with col2:
+            hat=st.selectbox("Hat",["","REÇEL","PÜRE","ATÖLYE 1 YM MM","ATÖLYE 2 YM MM","FIRIN-KESME","SEÇME","IQF","YIKAMA"])
+            if hat=="REÇEL":
+                hatara="08"
+            elif hat=="PÜRE":
+                hatara="09"
+            elif hat=="ATÖLYE 1 YM MM":
+                hatara="10"
+            elif hat=="ATÖLYE 2 YM MM":
+                hatara="07"
+            elif hat=="FIRIN-KESME":
+                hatara="05"
+            elif hat=="SEÇME":
+                hatara="03"
+            elif hat=="IQF":
+                hatara="06"
+            elif hat=="YIKAMA":
+                hatara="20"
+            else:
+                hatara="0"
+            tar=st.date_input("Tarih")
+            tar=tar.strftime('%d/%m/%Y')
+        with col3:
+            vardiyaarama=st.selectbox("Vardiya",["","1","2","3"])
+            st.write("")
+            st.write("")
+            tarihfiltresi=st.checkbox("Tarih filtresi?", False)
+        dfkapatma=dfkapatma[dfkapatma['STOK_ADI'].str.contains(aramamsormam)]
+        dfkapatma=dfkapatma[dfkapatma['STOK_KODU'].str.contains(stokkoduarama)]
+        dfkapatma=dfkapatma[dfkapatma['vardiya'].str.contains(vardiyaarama)]
+        if tarihfiltresi==True:
+            dfkapatma=dfkapatma[dfkapatma['TARIH'].str.contains(tar)]
+        else:
+            dfkapatma=dfkapatma
+
+
+
+        dfkapatma=dfkapatma[dfkapatma['surec'].str.contains(hatara)]
+        dfkapatma=dfkapatma[['ISEMRINO', 'STOK_KODU', 'STOK_ADI', 'vardiya', 'KAPALI',"surec", 'TARIH']]
+        grid = GridOptionsBuilder.from_dataframe(dfkapatma)
+        grid.configure_selection(use_checkbox=True, selection_mode="multiple")
+        gridOptions = grid.build()
+
+        column_defs = []
+        column_defs.append({'field': 'ISEMRINO', 'headerName': 'ISEMRINO', 'width': 150,'checkboxSelection': True})
+        column_defs.append({'field': 'STOK_KODU', 'headerName': 'STOK_KODU', 'width': 120})
+        column_defs.append({'field': 'STOK_ADI', 'headerName': 'STOK_ADI', 'width': 200})
+        column_defs.append({'field': 'vardiya', 'headerName': 'vardiya', 'width': 50})
+        column_defs.append({'field': 'TARIH', 'headerName': 'TARIH', 'width': 100})
+        column_defs.append({'field': 'surec', 'headerName': 'surec', 'width': 100})
+
+        gridOptions = {
+            'columnDefs': column_defs,
+            'rowSelection': 'multiple',
+            'suppressRowClickSelection': True,
+            'enableRangeSelection': True,
+            'domLayout': 'autoHeight',
+            'rowMultiSelectWithClick': True,
+            'checkboxSelection': True,
+            'height': 300,
+
+
+        }
+
+        allselect=st.checkbox("Tümünü seç", True)
+        js_code = """
+        <script>
+        const selectAllCheckbox = document.querySelector('input[data-field="__checkbox_selected"]');
+        const grid = document.querySelector('.ag-root-wrapper');
+        selectAllCheckbox.addEventListener('change', (event) => {
+            const checkboxes = grid.querySelectorAll('input[type="checkbox"][data-field="__checkbox_selected"]');
+            checkboxes.forEach((checkbox) => {
+                checkbox.checked = event.target.checked;
+                checkbox.dispatchEvent(new Event('change'));
+            });
+        });
+        </script>
+        """
+
+        if allselect==False:
+            st.markdown(js_code, unsafe_allow_html=True)
+        gridtable = AgGrid(dfkapatma, gridOptions=gridOptions, width='100%', height=300)
+
+        selected_rows = gridtable["selected_rows"]
+        dfselect=pd.DataFrame(selected_rows)
+        if dfselect.empty:
+            st.write("İŞ EMRİ SEÇİNİZ")
+        else:
+            dfselect=dfselect[['ISEMRINO','STOK_KODU','STOK_ADI','KAPALI',]]
+            aas=st.write(dfselect)
+        # Button to execute the update operation
+        kapatıyor = st.button("Kapat")
+        if kapatıyor:
+            selected_rows = gridtable["selected_rows"]
+            kapat(selected_rows)
+            #rerun
+
+            st.success("Selected rows updated successfully.")
+
+            st.experimental_rerun()
+    else:
+        st.warning("Sifre Yanlış")
